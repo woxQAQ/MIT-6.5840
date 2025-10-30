@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
 )
 
 // Test Put with a single client and a reliable network
@@ -80,7 +80,7 @@ func TestMemPutManyClientsReliable(t *testing.T) {
 	v := kvtest.RandValue(MEM)
 
 	cks := make([]kvtest.IKVClerk, NCLIENT)
-	for i, _ := range cks {
+	for i := range cks {
 		cks[i] = ts.MakeClerk()
 	}
 
