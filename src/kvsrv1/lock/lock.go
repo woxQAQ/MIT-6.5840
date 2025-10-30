@@ -52,6 +52,9 @@ func (lk *Lock) Acquire() {
 		//
 		// whatever the key exists or not, the return
 		// version is the one we need in put method
+		//
+		// task 3 has guarantee that the client
+		// can get the result on unreliable network
 		v, ver, err := lk.ck.Get(lk.lockKey)
 		if v != lockfree && err != rpc.ErrNoKey {
 			time.Sleep(time.Second)
@@ -70,6 +73,18 @@ func (lk *Lock) Acquire() {
 		err = lk.ck.Put(lk.lockKey, lk.clientId, ver)
 		if err == rpc.OK {
 			break
+		}
+		// 3. Check again if err is ErrMaybe
+		if err == rpc.ErrMaybe {
+			checkV, _, _ := lk.ck.Get(lk.lockKey)
+			// 3a. The lock has not been Acquired
+			if checkV == lockfree {
+				continue
+			}
+			// 3b. The lock has been Acquired by this
+			if checkV == lk.clientId {
+				break
+			}
 		}
 	}
 }
@@ -93,9 +108,23 @@ func (lk *Lock) Release() {
 	//
 	// we dont need to retry, because only the Acquirer can
 	// come here to set the lock to free.
-	err = lk.ck.Put(lk.lockKey, lockfree, ver)
-	if err == rpc.ErrVersion {
-		log.Print("Error: lock cannot be released")
-		return
+	for {
+		err = lk.ck.Put(lk.lockKey, lockfree, ver)
+		if err == rpc.ErrVersion {
+			log.Print("Error: lock cannot be released")
+			return
+		}
+		if err == rpc.ErrMaybe {
+			checkV, _, _ := lk.ck.Get(lk.lockKey)
+			// The lock has not been Acquired
+			if checkV == lockfree {
+				time.Sleep(time.Second)
+				continue
+			}
+			// The lock has been Acquired by this
+			if checkV == lk.clientId {
+				return
+			}
+		}
 	}
 }
