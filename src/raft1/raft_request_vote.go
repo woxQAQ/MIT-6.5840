@@ -1,20 +1,70 @@
 package raft
 
+import "time"
+
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	// Current term of candidate
+	Term int
+	// Candidate requesting vote
+	CandidateId int
+	// Index of candidate's last log entry
+	LastLogIndex int
+	// Term of candidate's last log entry
+	LastLogTerm int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
+	// Current term, for candidate to update itself
+	Term int
+	// True means candidate received vote
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	termDelay := args.Term < rf.currentTerm
+	hasVotedForOthers := args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId
+
+	if termDelay || hasVotedForOthers {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.switchRole(Follower)
+	}
+
+	if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = true
+	rf.votedFor = args.CandidateId
+	rf.lastReceivedTime = time.Now()
+}
+
+// NOTE: unsafe without lock
+func (rf *Raft) isLogUpToDate(lastLogIndex int, lastLogTerm int) bool {
+	ourLastLogIndex := len(rf.log) - 1
+	ourLastLogTerm := rf.log[ourLastLogIndex].Term
+
+	if lastLogTerm == ourLastLogTerm {
+		return lastLogIndex >= ourLastLogIndex
+	}
+	return lastLogTerm > ourLastLogTerm
 }
 
 // example code to send a RequestVote RPC to a server.
