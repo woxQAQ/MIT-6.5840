@@ -58,13 +58,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 		rf.lastReceivedTime = time.Now()
 	}
-	if args.PrevLogIndex > len(rf.log)-1 {
-		fail()
-		return
+	checkArgsMatch := func() bool {
+		if args.PrevLogIndex > len(rf.log)-1 {
+			return false
+		}
+		return args.PrevLogIndex < 0 || rf.log[args.PrevLogIndex].Term == args.PrevLogTerm
 	}
 
 	index := args.PrevLogIndex
-	if index > 0 && rf.log[index].Term != args.PrevLogTerm {
+	if !checkArgsMatch() {
 		fail()
 		return
 	}

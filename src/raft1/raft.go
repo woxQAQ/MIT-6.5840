@@ -131,14 +131,10 @@ func (rf *Raft) GetState() (int, bool) {
 // the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command any) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (3B).
-	term, isLeader = rf.GetState()
+	term, isLeader := rf.GetState()
 	if !isLeader {
-		return index, term, isLeader
+		return -1, term, isLeader
 	}
 
 	entry := LogEntry{
@@ -149,9 +145,8 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.log = append(rf.log, entry)
-	index = len(rf.log) - 1
 
-	return index, term, isLeader
+	return len(rf.log) - 1, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -165,7 +160,6 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
 }
 
 func (rf *Raft) killed() bool {
@@ -251,12 +245,11 @@ func (rf *Raft) heartBeat() {
 }
 
 func (rf *Raft) switchRole(role raftState) {
-	// TODO: implement
 	switch role {
 	case Leader:
 		rf.heartbeatCh = make(chan struct{})
 		for i := range rf.peers {
-			rf.matchIndex[i] = 0
+			rf.matchIndex[i] = -1
 			rf.nextIndex[i] = len(rf.log)
 		}
 		go func() {
@@ -284,10 +277,10 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		lastTime := rf.lastReceivedTime
 		isLeader := rf.role == Leader
+		rf.mu.Unlock()
 		if !isLeader && time.Since(lastTime) > time.Duration(ms)*time.Millisecond {
 			rf.election()
 		}
-		rf.mu.Unlock()
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -297,10 +290,12 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) election() {
+	rf.mu.Lock()
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
 	rf.switchRole(Candidate)
-	rf.lastReceivedTime = time.Now()
+	rf.mu.Unlock()
+	// rf.lastReceivedTime = time.Now()
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
@@ -336,6 +331,7 @@ func (rf *Raft) election() {
 			continue
 		}
 		go sendVoteReq2Peer(peer)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
