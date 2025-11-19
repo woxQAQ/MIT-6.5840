@@ -8,7 +8,9 @@ package raft
 
 import (
 	//	"bytes"
+
 	"math/rand"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,14 +22,29 @@ import (
 )
 
 type LogEntry struct {
-	Command interface{}
+	Command any
 	Term    int
 }
 
+type raftState int
+
+func (s raftState) String() string {
+	switch s {
+	case Leader:
+		return "leader"
+	case Follower:
+		return "follower"
+	case Candidate:
+		return "candidate"
+	default:
+		return ""
+	}
+}
+
 const (
-	Leader    = "Leader"
-	Follower  = "Follower"
-	Candidate = "Candidate"
+	Leader raftState = iota
+	Follower
+	Candidate
 
 	_HEART_BEAT_PER_SEC_  = 8
 	_HEART_BEAT_INTERVAL_ = time.Second / _HEART_BEAT_PER_SEC_
@@ -40,11 +57,12 @@ type Raft struct {
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	applych   chan raftapi.ApplyMsg
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	role             string
+	role             raftState
 	lastReceivedTime time.Time
 	heartbeatCh      chan struct{}
 
@@ -107,15 +125,31 @@ func (rf *Raft) GetState() (int, bool) {
 // this function should return gracefully.
 //
 // the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
+// if it's ever committed.
+// the second return value is the current
+// term.
+// the third return value is true if this server believes it is
 // the leader.
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+func (rf *Raft) Start(command any) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
 
 	// Your code here (3B).
+	term, isLeader = rf.GetState()
+	if !isLeader {
+		return index, term, isLeader
+	}
+
+	entry := LogEntry{
+		Command: command,
+		Term:    term,
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.log = append(rf.log, entry)
+	index = len(rf.log) - 1
 
 	return index, term, isLeader
 }
@@ -140,34 +174,83 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) heartBeat() {
-	for !rf.killed() {
-		select {
-		case <-rf.heartbeatCh:
+	select {
+	case <-rf.heartbeatCh:
+		return
+	default:
+		_, isleader := rf.GetState()
+		if !isleader {
 			return
-		default:
-			term, isLeader := rf.GetState()
-			if !isLeader {
-				return
-			}
-			args := AppendEntriesArgs{
-				Term:     term,
-				LeaderId: rf.me,
-			}
-			for i := range rf.peers {
-				if i == rf.me {
-					continue
-				}
-				go func(peer int) {
-					reply := AppendEntriesReply{}
-					rf.sendAppendEntries(peer, &args, &reply)
-				}(i)
-			}
-			time.Sleep(_HEART_BEAT_INTERVAL_)
 		}
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			go func(peer int) {
+				rf.mu.Lock()
+				prevLogIndex := rf.nextIndex[peer] - 1
+				args := AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: prevLogIndex,
+					Entries:      slices.Clone(rf.log[rf.nextIndex[peer]:]),
+					LeaderCommit: rf.commitIndex,
+				}
+				if prevLogIndex >= 0 {
+					args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+				}
+				rf.mu.Unlock()
+				reply := AppendEntriesReply{}
+				if !rf.sendAppendEntries(peer, &args, &reply) {
+					return
+				}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				rf.lastReceivedTime = time.Now()
+				if rf.role != Leader {
+					return
+				}
+
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.switchRole(Follower)
+					return
+				}
+				if !reply.Success {
+					if rf.nextIndex[peer] > 0 {
+						rf.nextIndex[peer]--
+					}
+					return
+				}
+				rf.nextIndex[peer] = len(rf.log)
+				rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+
+				for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
+					count := 1
+					if rf.log[n].Term != rf.currentTerm {
+						break
+					}
+					for i := range len(rf.peers) {
+						if i == rf.me {
+							continue
+						}
+						if rf.matchIndex[i] >= n {
+							count++
+						}
+					}
+					if count > len(rf.peers)/2 {
+						rf.commitIndex = n
+						go rf.applyLog()
+						break
+					}
+				}
+			}(i)
+		}
+		time.Sleep(_HEART_BEAT_INTERVAL_)
 	}
 }
 
-func (rf *Raft) switchRole(role string) {
+func (rf *Raft) switchRole(role raftState) {
 	// TODO: implement
 	switch role {
 	case Leader:
@@ -176,7 +259,13 @@ func (rf *Raft) switchRole(role string) {
 			rf.matchIndex[i] = 0
 			rf.nextIndex[i] = len(rf.log)
 		}
-		go rf.heartBeat()
+		go func() {
+			for !rf.killed() {
+				rf.heartBeat()
+			}
+		}()
+		// dPrintfRaft(rf, "switch to leader")
+		// go rf.heartBeat()
 	case Follower:
 		if rf.role == Leader {
 			close(rf.heartbeatCh)
@@ -221,6 +310,7 @@ func (rf *Raft) election() {
 
 	vote := 1
 
+	dPrintfRaft(rf, "Start Election")
 	sendVoteReq2Peer := func(peer int) {
 		reply := RequestVoteReply{}
 		if rf.sendRequestVote(peer, &args, &reply) {
@@ -249,26 +339,35 @@ func (rf *Raft) election() {
 	}
 }
 
-// the service or tester wants to create a Raft server. the ports
-// of all the Raft servers (including this one) are in peers[]. this
+// the service or tester wants to create a Raft server.
+//
+// the ports of all the Raft servers
+// (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
-// have the same order. persister is a place for this server to
+// have the same order.
+//
+// persister is a place for this server to
 // save its persistent state, and also initially holds the most
-// recent saved state, if any. applyCh is a channel on which the
+// recent saved state, if any.
+//
+// applyCh is a channel on which the
 // tester or service expects Raft to send ApplyMsg messages.
+//
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
+func Make(
+	peers []*labrpc.ClientEnd,
+	me int,
+	persister *tester.Persister,
+	applyCh chan raftapi.ApplyMsg,
+) raftapi.Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applych = applyCh
 
 	// Your initialization code here (3A, 3B, 3C).
-	rf.dead = 0
-
-	rf.currentTerm = 0
 	rf.log = []LogEntry{{Term: 0}} // log index starts from 1
 	rf.matchIndex = make([]int, len(peers))
 	rf.nextIndex = make([]int, len(peers))

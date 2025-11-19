@@ -1,5 +1,12 @@
 package raft
 
+import (
+	"encoding/json"
+	"time"
+
+	"6.5840/raftapi"
+)
+
 type AppendEntriesArgs struct {
 	// leader's term
 	Term int
@@ -15,6 +22,11 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
+func (s AppendEntriesArgs) String() string {
+	res, _ := json.Marshal(s)
+	return string(res)
+}
+
 type AppendEntriesReply struct {
 	// currentTerm, for leader to update itself
 	Term int
@@ -23,26 +35,75 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+func (s AppendEntriesReply) String() string {
+	res, _ := json.Marshal(s)
+	return string(res)
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	fail := func() {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+	}
 
 	// reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
+		fail()
+		return
+	} else if args.Term >= rf.currentTerm {
+		rf.switchRole(Follower)
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.lastReceivedTime = time.Now()
+	}
+	if args.PrevLogIndex > len(rf.log)-1 {
+		fail()
 		return
 	}
-	rf.currentTerm = args.Term
-	rf.votedFor = -1
-	rf.switchRole(Follower)
+
+	index := args.PrevLogIndex
+	if index > 0 && rf.log[index].Term != args.PrevLogTerm {
+		fail()
+		return
+	}
+
+	rf.log = rf.log[:index+1]
+	if len(args.Entries) > 0 {
+		rf.log = append(rf.log, args.Entries...)
+	}
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		go rf.applyLog()
+	}
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	//TODO: implement append entries
+}
+
+func (rf *Raft) applyLog() {
+	rf.mu.Lock()
+	msg := []raftapi.ApplyMsg{}
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		msg = append(msg, raftapi.ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[i].Command,
+			CommandIndex: i,
+		})
+	}
+	rf.mu.Unlock()
+	for _, m := range msg {
+		rf.applych <- m
+		rf.mu.Lock()
+		rf.lastApplied = m.CommandIndex
+		rf.mu.Unlock()
+	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	dPrintfRaft(rf, "Sending Append Entries %v to peer %v", args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	dPrintfRaft(rf, "receive from peer %d, reply: %v", server, reply)
 	return ok
 }

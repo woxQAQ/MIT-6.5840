@@ -1,6 +1,9 @@
 package raft
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -23,6 +26,11 @@ type RequestVoteReply struct {
 	Term int
 	// True means candidate received vote
 	VoteGranted bool
+}
+
+func (s RequestVoteReply) String() string {
+	res, _ := json.Marshal(s)
+	return string(res)
 }
 
 // example RequestVote RPC handler.
@@ -92,9 +100,12 @@ func (rf *Raft) isLogUpToDate(lastLogIndex int, lastLogTerm int) bool {
 //
 // if you're having trouble getting RPC to work, check that you've
 // capitalized all field names in structs passed over RPC, and
+//
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	dPrintfRaft(rf, "Sending RequestVote to peer %d", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	dPrintfRaft(rf, "receive reply from peer %d,reply: %v", server, reply)
 	return ok
 }
