@@ -46,7 +46,7 @@ const (
 	Follower
 	Candidate
 
-	_HEART_BEAT_PER_SEC_  = 8
+	_HEART_BEAT_PER_SEC_  = 10
 	_HEART_BEAT_INTERVAL_ = time.Second / _HEART_BEAT_PER_SEC_
 )
 
@@ -223,6 +223,16 @@ func (rf *Raft) doAppendEntries(peer int) {
 		return
 	}
 	prevLogIndex := rf.nextIndex[peer] - 1
+
+	// 边界检查：确保 nextIndex 不会越界
+	if prevLogIndex < 0 {
+		prevLogIndex = 0
+		rf.nextIndex[peer] = 1
+	}
+	if rf.nextIndex[peer] > len(rf.log) {
+		rf.nextIndex[peer] = len(rf.log)
+	}
+
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -251,8 +261,10 @@ func (rf *Raft) doAppendEntries(peer int) {
 		return
 	}
 	if !reply.Success {
-		if rf.nextIndex[peer] > 0 {
-			rf.nextIndex[peer]--
+		// 使用冲突信息快速回退 nextIndex
+		rf.nextIndex[peer] = rf.findConflictIndex(reply.ConflictTerm, reply.ConflictIndex)
+		if rf.nextIndex[peer] < 1 {
+			rf.nextIndex[peer] = 1
 		}
 		// sync again
 		select {
@@ -294,6 +306,23 @@ func (rf *Raft) replicateWorker(peer int) {
 			return
 		}
 	}
+}
+
+// 找到冲突的索引
+// 如果 leader 有 ConflictTerm，返回 leader 中该 term 的第一个索引
+// 否则直接返回 ConflictIndex
+func (rf *Raft) findConflictIndex(conflictTerm int, conflictIndex int) int {
+	if conflictTerm > 0 {
+		// 尝试在 leader 的 log 中找到 conflictTerm
+		for i := 0; i < len(rf.log); i++ {
+			if rf.log[i].Term == conflictTerm {
+				// 找到该 term 的第一个索引
+				return i
+			}
+		}
+	}
+	// 如果 leader 没有这个 term，直接返回 conflictIndex
+	return conflictIndex
 }
 
 func (rf *Raft) switchRole(role raftState) {
@@ -358,38 +387,56 @@ func (rf *Raft) election() {
 		LastLogIndex: len(rf.log) - 1,
 		LastLogTerm:  rf.log[len(rf.log)-1].Term,
 	}
-	rf.mu.Unlock()
 
 	vote := 1
+	var voteMu sync.Mutex
+	var wg sync.WaitGroup
 
 	dPrintfRaft(rf, "Start Election")
-	sendVoteReq2Peer := func(peer int) {
-		reply := RequestVoteReply{}
-		if rf.sendRequestVote(peer, &args, &reply) {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			if rf.role == Candidate && reply.VoteGranted {
-				vote += 1
-				if vote > len(rf.peers)/2 {
-					rf.switchRole(Leader)
-					return
-				}
-			} else if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.switchRole(Follower)
-				rf.votedFor = -1
-				return
-			}
-		}
-	}
+	rf.mu.Unlock()
 
+	// 并行发送 vote 请求，而不是按顺序发送
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		go sendVoteReq2Peer(peer)
-		time.Sleep(10 * time.Millisecond)
+		wg.Add(1)
+		go func(peer int) {
+			defer wg.Done()
+			reply := RequestVoteReply{}
+			if rf.sendRequestVote(peer, &args, &reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				// 如果已经不再是 candidate，直接返回
+				if rf.role != Candidate {
+					return
+				}
+
+				if reply.VoteGranted {
+					voteMu.Lock()
+					vote++
+					currentVote := vote
+					voteMu.Unlock()
+
+					if currentVote > len(rf.peers)/2 {
+						rf.switchRole(Leader)
+					}
+				} else if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.switchRole(Follower)
+					rf.votedFor = -1
+				}
+			}
+		}(peer)
 	}
+
+	// 等待一段时间让投票完成，但不要无限等待
+	// 这可以避免某个 peer 无响应时阻塞整个选举
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		wg.Wait()
+	}()
 }
 
 // the service or tester wants to create a Raft server.
