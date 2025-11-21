@@ -43,14 +43,16 @@ func (s AppendEntriesReply) String() string {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fail := func() {
-		reply.Term = rf.currentTerm
-		reply.Success = false
+	fail := func(reason ...string) {
+		if len(reason) != 0 {
+			dPrintfRaft(rf, "append entry failed due to %s", reason[0])
+		}
+		reply.Term, reply.Success = rf.currentTerm, false
 	}
 
 	// reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
-		fail()
+		fail("requester term lag")
 		return
 	} else if args.Term >= rf.currentTerm {
 		rf.switchRole(Follower)
@@ -106,6 +108,10 @@ func (rf *Raft) applyLog() {
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	dPrintfRaft(rf, "Sending Append Entries %v to peer %v", args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	dPrintfRaft(rf, "receive from peer %d, reply: %v", server, reply)
+	if !ok {
+		dPrintfRaft(rf, "failed to send appendentries rpc to peer %d", server)
+	} else {
+		dPrintfRaft(rf, "receive Append Entries reply from peer %d, reply: %v", server, reply)
+	}
 	return ok
 }

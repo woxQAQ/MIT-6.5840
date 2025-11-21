@@ -10,6 +10,9 @@ package raft
 
 import (
 	"fmt"
+	"os"
+	"runtime/pprof"
+
 	// "log"
 	"math/rand"
 	"sync"
@@ -17,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 // The tester generously allows solutions to complete elections in one second
@@ -523,6 +526,12 @@ func TestRejoin3B(t *testing.T) {
 }
 
 func TestBackup3B(t *testing.T) {
+	if PPROF {
+		os.Remove("test-3B.cpu.out")
+		f, _ := os.Create("test-3B.cpu.out")
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 	servers := 5
 	ts := makeTest(t, servers, true, false)
 	defer ts.cleanup()

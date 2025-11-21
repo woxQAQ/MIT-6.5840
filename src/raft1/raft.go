@@ -65,6 +65,8 @@ type Raft struct {
 	role             raftState
 	lastReceivedTime time.Time
 	heartbeatCh      chan struct{}
+	// peer to replicateCh
+	replicateChMap map[int]chan struct{}
 
 	// persistent state on all servers
 	//
@@ -181,66 +183,116 @@ func (rf *Raft) heartBeat() {
 				continue
 			}
 			go func(peer int) {
-				rf.mu.Lock()
-				prevLogIndex := rf.nextIndex[peer] - 1
-				args := AppendEntriesArgs{
-					Term:         rf.currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: prevLogIndex,
-					Entries:      slices.Clone(rf.log[rf.nextIndex[peer]:]),
-					LeaderCommit: rf.commitIndex,
-				}
-				if prevLogIndex >= 0 {
-					args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-				}
-				rf.mu.Unlock()
-				reply := AppendEntriesReply{}
-				if !rf.sendAppendEntries(peer, &args, &reply) {
-					return
-				}
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				rf.lastReceivedTime = time.Now()
-				if rf.role != Leader {
-					return
-				}
-
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.switchRole(Follower)
-					return
-				}
-				if !reply.Success {
-					if rf.nextIndex[peer] > 0 {
-						rf.nextIndex[peer]--
-					}
-					return
-				}
-				rf.nextIndex[peer] = len(rf.log)
-				rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
-
-				for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
-					count := 1
-					if rf.log[n].Term != rf.currentTerm {
-						break
-					}
-					for i := range len(rf.peers) {
-						if i == rf.me {
-							continue
-						}
-						if rf.matchIndex[i] >= n {
-							count++
-						}
-					}
-					if count > len(rf.peers)/2 {
-						rf.commitIndex = n
-						go rf.applyLog()
-						break
-					}
-				}
+				rf.doAppendEntries(peer)
 			}(i)
 		}
-		time.Sleep(_HEART_BEAT_INTERVAL_)
+	}
+}
+
+func (rf *Raft) leaderLoop() {
+	ticker := time.NewTicker(_HEART_BEAT_INTERVAL_)
+	defer ticker.Stop()
+	for !rf.killed() {
+		select {
+		case <-ticker.C:
+			rf.mu.Lock()
+			if rf.role != Leader {
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+			for i := range rf.peers {
+				if i == rf.me {
+					continue
+				}
+				select {
+				case rf.replicateChMap[i] <- struct{}{}:
+				default:
+				}
+			}
+		case <-rf.heartbeatCh:
+			return
+		}
+	}
+}
+
+func (rf *Raft) doAppendEntries(peer int) {
+	rf.mu.Lock()
+	if rf.role != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	prevLogIndex := rf.nextIndex[peer] - 1
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		Entries:      slices.Clone(rf.log[rf.nextIndex[peer]:]),
+		LeaderCommit: rf.commitIndex,
+	}
+	if prevLogIndex >= 0 {
+		args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+	}
+	rf.mu.Unlock()
+	reply := AppendEntriesReply{}
+	if !rf.sendAppendEntries(peer, &args, &reply) {
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// rf.lastReceivedTime = time.Now()
+
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.switchRole(Follower)
+		return
+	}
+	if rf.role != Leader {
+		return
+	}
+	if !reply.Success {
+		if rf.nextIndex[peer] > 0 {
+			rf.nextIndex[peer]--
+		}
+		// sync again
+		select {
+		case rf.replicateChMap[peer] <- struct{}{}:
+		default:
+		}
+		return
+	}
+	rf.nextIndex[peer] = len(rf.log)
+	rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+
+	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
+		count := 1
+		if rf.log[n].Term != rf.currentTerm {
+			break
+		}
+		for i := range len(rf.peers) {
+			if i == rf.me {
+				continue
+			}
+			if rf.matchIndex[i] >= n {
+				count++
+			}
+		}
+		if count > len(rf.peers)/2 {
+			rf.commitIndex = n
+			go rf.applyLog()
+			break
+		}
+	}
+}
+
+func (rf *Raft) replicateWorker(peer int) {
+	for !rf.killed() {
+		select {
+		case <-rf.replicateChMap[peer]:
+			rf.doAppendEntries(peer)
+		case <-rf.heartbeatCh:
+			return
+		}
 	}
 }
 
@@ -251,12 +303,17 @@ func (rf *Raft) switchRole(role raftState) {
 		for i := range rf.peers {
 			rf.matchIndex[i] = -1
 			rf.nextIndex[i] = len(rf.log)
-		}
-		go func() {
-			for !rf.killed() {
-				rf.heartBeat()
+			if i != rf.me {
+				go rf.replicateWorker(i)
 			}
-		}()
+		}
+		go rf.leaderLoop()
+		// go func() {
+		// 	for !rf.killed() {
+		// 		rf.heartBeat()
+		// 		time.Sleep(_HEART_BEAT_INTERVAL_)
+		// 	}
+		// }()
 		// dPrintfRaft(rf, "switch to leader")
 		// go rf.heartBeat()
 	case Follower:
@@ -294,7 +351,6 @@ func (rf *Raft) election() {
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
 	rf.switchRole(Candidate)
-	rf.mu.Unlock()
 	// rf.lastReceivedTime = time.Now()
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -302,6 +358,7 @@ func (rf *Raft) election() {
 		LastLogIndex: len(rf.log) - 1,
 		LastLogTerm:  rf.log[len(rf.log)-1].Term,
 	}
+	rf.mu.Unlock()
 
 	vote := 1
 
@@ -362,6 +419,12 @@ func Make(
 	rf.persister = persister
 	rf.me = me
 	rf.applych = applyCh
+	rf.replicateChMap = make(map[int]chan struct{})
+	for i := range peers {
+		if i != rf.me {
+			rf.replicateChMap[i] = make(chan struct{})
+		}
+	}
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.log = []LogEntry{{Term: 0}} // log index starts from 1

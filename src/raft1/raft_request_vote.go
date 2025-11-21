@@ -39,10 +39,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	termDelay := args.Term < rf.currentTerm
+	isTermDelay := args.Term < rf.currentTerm
 	hasVotedForOthers := args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId
 
-	if termDelay || hasVotedForOthers {
+	if isTermDelay || hasVotedForOthers {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
@@ -106,6 +106,10 @@ func (rf *Raft) isLogUpToDate(lastLogIndex int, lastLogTerm int) bool {
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	dPrintfRaft(rf, "Sending RequestVote to peer %d", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	dPrintfRaft(rf, "receive reply from peer %d,reply: %v", server, reply)
+	if !ok {
+		dPrintfRaft(rf, "failed to send requestvote rpc to peer %d", server)
+	} else {
+		dPrintfRaft(rf, "receive reply from peer %d,reply: %v", server, reply)
+	}
 	return ok
 }
