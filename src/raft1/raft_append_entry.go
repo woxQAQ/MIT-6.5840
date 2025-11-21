@@ -88,7 +88,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) applyLog() {
 	rf.mu.Lock()
-	msg := []raftapi.ApplyMsg{}
+	msg := make([]raftapi.ApplyMsg, 0, rf.commitIndex-rf.lastApplied)
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		msg = append(msg, raftapi.ApplyMsg{
 			CommandValid: true,
@@ -105,7 +105,11 @@ func (rf *Raft) applyLog() {
 	}
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(
+	server int,
+	args *AppendEntriesArgs,
+	reply *AppendEntriesReply,
+) bool {
 	dPrintfRaft(rf, "Sending Append Entries %v to peer %v", args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok {
