@@ -93,7 +93,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 追加日志
 	rf.log = rf.log[:args.PrevLogIndex+1]
 	if len(args.Entries) > 0 {
-		rf.log = append(rf.log, args.Entries...)
+		// 更新 termToFirstIndex 缓存
+		for _, entry := range args.Entries {
+			if _, ok := rf.termToFirstIndex[entry.Term]; !ok {
+				rf.termToFirstIndex[entry.Term] = len(rf.log)
+			}
+			rf.log = append(rf.log, entry)
+		}
 	}
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
@@ -106,8 +112,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) applyLog() {
 	rf.mu.Lock()
-	// 批量准备所有消息
-	msgs := make([]raftapi.ApplyMsg, 0, rf.commitIndex-rf.lastApplied)
+
+	// 从 pool 获取切片，如果容量不够则重新分配
+	msgs := rf.applyMsgPool.Get().([]raftapi.ApplyMsg)
+	// 重置切片但不释放底层数组
+	msgs = msgs[:0]
+
+	// 如果容量不够，扩容
+	neededCap := rf.commitIndex - rf.lastApplied
+	if cap(msgs) < neededCap {
+		msgs = make([]raftapi.ApplyMsg, 0, neededCap)
+	}
+
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		msgs = append(msgs, raftapi.ApplyMsg{
 			CommandValid: true,
@@ -123,6 +139,10 @@ func (rf *Raft) applyLog() {
 	for _, msg := range msgs {
 		rf.applych <- msg
 	}
+
+	// 将切片放回 pool，注意要重置切片
+	msgs = msgs[:0]
+	rf.applyMsgPool.Put(msgs)
 }
 
 func (rf *Raft) sendAppendEntries(

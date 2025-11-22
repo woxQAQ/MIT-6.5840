@@ -10,7 +10,6 @@ import (
 	//	"bytes"
 
 	"math/rand"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,6 +100,14 @@ type Raft struct {
 	// known to be replicated on server
 	// initialized to 0, increases monotonically
 	matchIndex []int
+
+	// 优化：缓存每个 term 的第一个索引，用于快速查找
+	// key: term, value: first index with this term
+	termToFirstIndex map[int]int
+
+	// 优化：sync.Pool 用于复用切片，减少 GC 压力
+	applyMsgPool sync.Pool
+	entriesPool  sync.Pool
 }
 
 // return currentTerm and whether this server
@@ -146,6 +153,12 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// 记录新 term 的第一个索引
+	if _, ok := rf.termToFirstIndex[term]; !ok {
+		rf.termToFirstIndex[term] = len(rf.log)
+	}
+
 	rf.log = append(rf.log, entry)
 
 	return len(rf.log) - 1, term, isLeader
@@ -233,11 +246,27 @@ func (rf *Raft) doAppendEntries(peer int) {
 		rf.nextIndex[peer] = len(rf.log)
 	}
 
+	// 从 pool 获取 entries 切片
+	entries := rf.entriesPool.Get().([]LogEntry)
+	entries = entries[:0] // 重置切片
+
+	// 复制需要的日志条目
+	needed := rf.log[rf.nextIndex[peer]:]
+	if cap(entries) < len(needed) {
+		// 容量不够，重新分配
+		entries = make([]LogEntry, len(needed))
+		copy(entries, needed)
+	} else {
+		// 容量足够，扩展切片
+		entries = entries[:len(needed)]
+		copy(entries, needed)
+	}
+
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogIndex,
-		Entries:      slices.Clone(rf.log[rf.nextIndex[peer]:]),
+		Entries:      entries,
 		LeaderCommit: rf.commitIndex,
 	}
 	if prevLogIndex >= 0 {
@@ -245,9 +274,17 @@ func (rf *Raft) doAppendEntries(peer int) {
 	}
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{}
-	if !rf.sendAppendEntries(peer, &args, &reply) {
+	ok := rf.sendAppendEntries(peer, &args, &reply)
+
+	// RPC 完成后，将 entries 切片放回 pool
+	// 注意：要先做重置，然后放回
+	entries = entries[:0]
+	rf.entriesPool.Put(entries)
+
+	if !ok {
 		return
 	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// rf.lastReceivedTime = time.Now()
@@ -309,16 +346,14 @@ func (rf *Raft) replicateWorker(peer int) {
 }
 
 // 找到冲突的索引
+// 使用 termToFirstIndex 缓存，O(1) 查找
 // 如果 leader 有 ConflictTerm，返回 leader 中该 term 的第一个索引
 // 否则直接返回 ConflictIndex
 func (rf *Raft) findConflictIndex(conflictTerm int, conflictIndex int) int {
 	if conflictTerm > 0 {
-		// 尝试在 leader 的 log 中找到 conflictTerm
-		for i := 0; i < len(rf.log); i++ {
-			if rf.log[i].Term == conflictTerm {
-				// 找到该 term 的第一个索引
-				return i
-			}
+		// 使用缓存快速查找
+		if idx, ok := rf.termToFirstIndex[conflictTerm]; ok {
+			return idx
 		}
 	}
 	// 如果 leader 没有这个 term，直接返回 conflictIndex
@@ -479,6 +514,22 @@ func Make(
 	rf.nextIndex = make([]int, len(peers))
 	rf.votedFor = -1
 	rf.role = Follower
+
+	// 初始化 termToFirstIndex 缓存
+	rf.termToFirstIndex = make(map[int]int)
+	rf.termToFirstIndex[0] = 0 // term 0 从索引 0 开始
+
+	// 初始化 sync.Pool
+	rf.applyMsgPool = sync.Pool{
+		New: func() interface{} {
+			return make([]raftapi.ApplyMsg, 0, 128)
+		},
+	}
+	rf.entriesPool = sync.Pool{
+		New: func() interface{} {
+			return make([]LogEntry, 0, 128)
+		},
+	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
