@@ -37,31 +37,44 @@ func (s RequestVoteReply) String() string {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
-	isTermDelay := args.Term < rf.currentTerm
-	hasVotedForOthers := args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId
-
-	if isTermDelay || hasVotedForOthers {
+	// 快速路径：term 太小直接拒绝（最常见的情况）
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		rf.mu.Unlock()
 		return
 	}
+
+	// term 太大，需要更新
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.switchRole(Follower)
 	}
 
+	// term 相同，检查是否已投票给其他人
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		rf.mu.Unlock()
+		return
+	}
+
+	// 检查日志是否最新（日志检查需要保持锁）
 	if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		rf.mu.Unlock()
 		return
 	}
+
+	// 授予投票
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
 	rf.lastReceivedTime = time.Now()
+	rf.mu.Unlock()
 }
 
 // NOTE: unsafe without lock

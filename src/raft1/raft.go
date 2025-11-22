@@ -313,11 +313,26 @@ func (rf *Raft) doAppendEntries(peer int) {
 	rf.nextIndex[peer] = len(rf.log)
 	rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 
-	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
-		count := 1
+	newMatch := rf.matchIndex[peer]
+	// 如果新的 matchIndex 没有超过当前的 commitIndex，不可能提交新日志
+	if newMatch <= rf.commitIndex {
+		return
+	}
+
+	// 只检查从 commitIndex+1 到 newMatch 的区间
+	start := rf.commitIndex + 1
+	end := newMatch
+	if end >= len(rf.log) {
+		end = len(rf.log) - 1
+	}
+
+	for n := start; n <= end; n++ {
+		// 只有当前 term 的日志才能被提交（Raft 论文 5.4.2）
 		if rf.log[n].Term != rf.currentTerm {
-			break
+			continue
 		}
+
+		count := 1
 		for i := range len(rf.peers) {
 			if i == rf.me {
 				continue
@@ -329,7 +344,6 @@ func (rf *Raft) doAppendEntries(peer int) {
 		if count > len(rf.peers)/2 {
 			rf.commitIndex = n
 			go rf.applyLog()
-			break
 		}
 	}
 }
@@ -402,7 +416,6 @@ func (rf *Raft) election() {
 	}
 
 	vote := 1
-	var voteMu sync.Mutex
 	var wg sync.WaitGroup
 
 	dPrintfRaft(rf, "Start Election")
@@ -427,12 +440,8 @@ func (rf *Raft) election() {
 				}
 
 				if reply.VoteGranted {
-					voteMu.Lock()
 					vote++
-					currentVote := vote
-					voteMu.Unlock()
-
-					if currentVote > len(rf.peers)/2 {
+					if vote > len(rf.peers)/2 {
 						rf.switchRole(Leader)
 					}
 				} else if reply.Term > rf.currentTerm {
@@ -449,7 +458,7 @@ func (rf *Raft) election() {
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		wg.Wait()
-	}()
+	}
 }
 
 // the service or tester wants to create a Raft server.
