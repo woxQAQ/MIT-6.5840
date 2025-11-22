@@ -8,7 +8,7 @@ import (
 // Debugging
 var (
 	Debug = false
-	PPROF = false
+	PPROF = true
 
 	Server = -1
 )
@@ -23,6 +23,11 @@ func dPrintfRaft(rf *Raft, format string, a ...any) {
 	if Server != -1 && rf.me != Server {
 		return
 	}
-	format = fmt.Sprintf("[Server=%d,role=%s,term=%d]", rf.me, rf.role, rf.currentTerm) + " " + format
+	format = fmt.Sprintf(
+		"[Server=%d,role=%s,term=%d]",
+		rf.me,
+		rf.role,
+		rf.currentTerm,
+	) + " " + format
 	DPrintf(format, a...)
 }

@@ -64,8 +64,6 @@ type Raft struct {
 	role             raftState
 	lastReceivedTime time.Time
 	heartbeatCh      chan struct{}
-	// peer to replicateCh
-	replicateChMap map[int]chan struct{}
 
 	// persistent state on all servers
 	//
@@ -214,14 +212,12 @@ func (rf *Raft) leaderLoop() {
 				return
 			}
 			rf.mu.Unlock()
+			// 直接调用 doAppendEntries，不通过 channel
 			for i := range rf.peers {
 				if i == rf.me {
 					continue
 				}
-				select {
-				case rf.replicateChMap[i] <- struct{}{}:
-				default:
-				}
+				go rf.doAppendEntries(i)
 			}
 		case <-rf.heartbeatCh:
 			return
@@ -287,7 +283,6 @@ func (rf *Raft) doAppendEntries(peer int) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// rf.lastReceivedTime = time.Now()
 
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
@@ -302,11 +297,6 @@ func (rf *Raft) doAppendEntries(peer int) {
 		rf.nextIndex[peer] = rf.findConflictIndex(reply.ConflictTerm, reply.ConflictIndex)
 		if rf.nextIndex[peer] < 1 {
 			rf.nextIndex[peer] = 1
-		}
-		// sync again
-		select {
-		case rf.replicateChMap[peer] <- struct{}{}:
-		default:
 		}
 		return
 	}
@@ -334,17 +324,6 @@ func (rf *Raft) doAppendEntries(peer int) {
 	}
 }
 
-func (rf *Raft) replicateWorker(peer int) {
-	for !rf.killed() {
-		select {
-		case <-rf.replicateChMap[peer]:
-			rf.doAppendEntries(peer)
-		case <-rf.heartbeatCh:
-			return
-		}
-	}
-}
-
 // 找到冲突的索引
 // 使用 termToFirstIndex 缓存，O(1) 查找
 // 如果 leader 有 ConflictTerm，返回 leader 中该 term 的第一个索引
@@ -367,19 +346,8 @@ func (rf *Raft) switchRole(role raftState) {
 		for i := range rf.peers {
 			rf.matchIndex[i] = -1
 			rf.nextIndex[i] = len(rf.log)
-			if i != rf.me {
-				go rf.replicateWorker(i)
-			}
 		}
 		go rf.leaderLoop()
-		// go func() {
-		// 	for !rf.killed() {
-		// 		rf.heartBeat()
-		// 		time.Sleep(_HEART_BEAT_INTERVAL_)
-		// 	}
-		// }()
-		// dPrintfRaft(rf, "switch to leader")
-		// go rf.heartBeat()
 	case Follower:
 		if rf.role == Leader {
 			close(rf.heartbeatCh)
@@ -501,12 +469,6 @@ func Make(
 	rf.persister = persister
 	rf.me = me
 	rf.applych = applyCh
-	rf.replicateChMap = make(map[int]chan struct{})
-	for i := range peers {
-		if i != rf.me {
-			rf.replicateChMap[i] = make(chan struct{})
-		}
-	}
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.log = []LogEntry{{Term: 0}} // log index starts from 1
