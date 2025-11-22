@@ -64,6 +64,8 @@ type Raft struct {
 	role             raftState
 	lastReceivedTime time.Time
 	heartbeatCh      chan struct{}
+	// 优化：为每个 follower 创建长期运行的 worker，避免频繁创建 goroutine
+	replicateTickers []*time.Ticker
 
 	// persistent state on all servers
 	//
@@ -201,28 +203,36 @@ func (rf *Raft) heartBeat() {
 }
 
 func (rf *Raft) leaderLoop() {
-	ticker := time.NewTicker(_HEART_BEAT_INTERVAL_)
-	defer ticker.Stop()
-	for !rf.killed() {
-		select {
-		case <-ticker.C:
-			rf.mu.Lock()
-			if rf.role != Leader {
-				rf.mu.Unlock()
-				return
-			}
-			rf.mu.Unlock()
-			// 直接调用 doAppendEntries，不通过 channel
-			for i := range rf.peers {
-				if i == rf.me {
-					continue
-				}
-				go rf.doAppendEntries(i)
-			}
-		case <-rf.heartbeatCh:
-			return
+	// 初始化 replicateTickers
+	rf.mu.Lock()
+	rf.replicateTickers = make([]*time.Ticker, len(rf.peers))
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
 		}
+		rf.replicateTickers[i] = time.NewTicker(_HEART_BEAT_INTERVAL_)
+		// 为每个 follower 启动 long-running worker
+		go func(peer int, ticker *time.Ticker) {
+			defer ticker.Stop()
+			for !rf.killed() {
+				select {
+				case <-ticker.C:
+					rf.doAppendEntries(peer)
+				case <-rf.heartbeatCh:
+					return
+				}
+			}
+		}(i, rf.replicateTickers[i])
 	}
+	rf.mu.Unlock()
+
+	// leaderLoop 只需要等待退出信号
+	<-rf.heartbeatCh
+
+	// 清理 tickers（worker 会自己停止自己的 ticker）
+	rf.mu.Lock()
+	rf.replicateTickers = nil
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) doAppendEntries(peer int) {
@@ -480,6 +490,9 @@ func Make(
 	// 初始化 termToFirstIndex 缓存
 	rf.termToFirstIndex = make(map[int]int)
 	rf.termToFirstIndex[0] = 0 // term 0 从索引 0 开始
+
+	// 初始化 replicateTickers（在成为 leader 时实际创建）
+	rf.replicateTickers = nil
 
 	// 初始化 sync.Pool
 	rf.applyMsgPool = sync.Pool{
