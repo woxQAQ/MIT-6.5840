@@ -1,43 +1,10 @@
 package raft
 
-import (
-	"encoding/json"
-	"time"
-)
-
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
-	// Current term of candidate
-	Term int
-	// Candidate requesting vote
-	CandidateId int
-	// Index of candidate's last log entry
-	LastLogIndex int
-	// Term of candidate's last log entry
-	LastLogTerm int
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Current term, for candidate to update itself
-	Term int
-	// True means candidate received vote
-	VoteGranted bool
-}
-
-func (s RequestVoteReply) String() string {
-	res, _ := json.Marshal(s)
-	return string(res)
-}
-
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.Lock()
+	defer rf.Unlock()
 
 	termDelay := args.Term < rf.currentTerm
 	hasVotedForOthers := args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId
@@ -61,7 +28,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
-	rf.lastReceivedTime = time.Now()
 }
 
 // NOTE: unsafe without lock

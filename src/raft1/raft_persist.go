@@ -40,8 +40,8 @@ func (rf *Raft) readPersist(data []byte) {
 
 // how many bytes in Raft's persisted log?
 func (rf *Raft) PersistBytes() int {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.Lock()
+	defer rf.Unlock()
 	return rf.persister.RaftStateSize()
 }
 
@@ -51,5 +51,4 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
 }

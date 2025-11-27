@@ -1,48 +1,16 @@
 package raft
 
 import (
-	"encoding/json"
-	"time"
-
 	"6.5840/raftapi"
 )
 
-type AppendEntriesArgs struct {
-	// leader's term
-	Term int
-	// so follower can redirect clients
-	LeaderId int
-	// index of log entry immediately preceding new ones
-	PrevLogIndex int
-	// term of PrevLogIndex entry
-	PrevLogTerm int
-	// log entries to store (empty for heartbeat;
-	Entries []LogEntry
-	// leader's commit index
-	LeaderCommit int
-}
-
-func (s AppendEntriesArgs) String() string {
-	res, _ := json.Marshal(s)
-	return string(res)
-}
-
-type AppendEntriesReply struct {
-	// currentTerm, for leader to update itself
-	Term int
-	// true if follower contained entry matching
-	// PrevLogIndex and PrevLogTerm
-	Success bool
-}
-
-func (s AppendEntriesReply) String() string {
-	res, _ := json.Marshal(s)
-	return string(res)
+func (rf *Raft) checkLogMatch(index, term int) bool {
+	return index <= len(rf.log)-1 && rf.log[index].Term == term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.Lock()
+	defer rf.Unlock()
 	fail := func() {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -52,21 +20,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		fail()
 		return
-	} else if args.Term >= rf.currentTerm {
-		rf.switchRole(Follower)
+	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.lastReceivedTime = time.Now()
 	}
-	checkArgsMatch := func() bool {
-		if args.PrevLogIndex > len(rf.log)-1 {
-			return false
-		}
-		return args.PrevLogIndex < 0 || rf.log[args.PrevLogIndex].Term == args.PrevLogTerm
-	}
+	rf.switchRole(Follower)
 
 	index := args.PrevLogIndex
-	if !checkArgsMatch() {
+	if !rf.checkLogMatch(index, args.PrevLogTerm) {
 		fail()
 		return
 	}
@@ -85,7 +46,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) applyLog() {
-	rf.mu.Lock()
+	rf.RLock()
 	msg := []raftapi.ApplyMsg{}
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		msg = append(msg, raftapi.ApplyMsg{
@@ -94,12 +55,12 @@ func (rf *Raft) applyLog() {
 			CommandIndex: i,
 		})
 	}
-	rf.mu.Unlock()
+	rf.RUnlock()
 	for _, m := range msg {
 		rf.applych <- m
-		rf.mu.Lock()
+		rf.Lock()
 		rf.lastApplied = m.CommandIndex
-		rf.mu.Unlock()
+		rf.Unlock()
 	}
 }
 
