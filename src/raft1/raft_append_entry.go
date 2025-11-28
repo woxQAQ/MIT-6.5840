@@ -33,16 +33,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		fail()
 		lastLogIndex := rf.getLastLogIndex()
 		if lastLogIndex < args.PrevLogIndex {
-			reply.ConflictIndex = lastLogIndex + 1
-			reply.ConflictTerm = -1
+			reply.ConflictIndex = lastLogIndex
+			reply.ConflictTerm = 0
 		} else {
-			index := args.PrevLogIndex
-			for index >= 0 && rf.logs[index].Term == args.PrevLogTerm {
+			reply.ConflictTerm = rf.logs[index].Term
+			for index > 0 && rf.logs[index].Term >= reply.ConflictTerm {
 				index--
 			}
 			reply.ConflictIndex = index + 1
-			reply.ConflictTerm = args.PrevLogTerm
 		}
+		// TODO:set conflict index
 		return
 	}
 
@@ -61,21 +61,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) applyLog() {
-	rf.RLock()
-	msg := []raftapi.ApplyMsg{}
+	rf.Lock()
+	defer rf.Unlock()
+
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-		msg = append(msg, raftapi.ApplyMsg{
-			CommandValid: true,
-			Command:      rf.logs[i].Command,
-			CommandIndex: i,
-		})
-	}
-	rf.RUnlock()
-	for _, m := range msg {
-		rf.applych <- m
-		rf.Lock()
-		rf.lastApplied = m.CommandIndex
-		rf.Unlock()
+		if i < len(rf.logs) {
+			msg := raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logs[i].Command,
+				CommandIndex: i,
+			}
+			rf.applych <- msg
+			rf.lastApplied = i
+		}
 	}
 }
 

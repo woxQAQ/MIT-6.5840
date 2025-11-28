@@ -9,7 +9,7 @@ import (
 )
 
 // Debugging
-const Debug = false
+const Debug = true
 
 const (
 	_HEART_BEAT_PER_SEC_  = 8

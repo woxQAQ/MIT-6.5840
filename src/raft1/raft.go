@@ -8,7 +8,6 @@ package raft
 
 import (
 	"slices"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -140,19 +139,21 @@ func (rf *Raft) heartBeat() {
 	sendAppendEntriesToPeer := func(peer int) {
 		rf.RLock()
 		if rf.role != Leader {
+			rf.RUnlock()
 			return
 		}
 		prevLogIndex := rf.nextIndex[peer] - 1
-		// entries := make([]LogEntry, len(rf.logs[prevLogIndex+1:]))
+		var prevLogTerm int
+		if prevLogIndex >= 0 && prevLogIndex < len(rf.logs) {
+			prevLogTerm = rf.logs[prevLogIndex].Term
+		}
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
 			Entries:      slices.Clone(rf.logs[rf.nextIndex[peer]:]),
 			LeaderCommit: rf.commitIndex,
-		}
-		if prevLogIndex >= 0 {
-			args.PrevLogTerm = rf.logs[prevLogIndex].Term
 		}
 		rf.RUnlock()
 		reply := AppendEntriesReply{}
@@ -165,17 +166,13 @@ func (rf *Raft) heartBeat() {
 			return
 		}
 		handleConflictTerm := func() {
-			lo, hi := -1, args.PrevLogIndex
-			for lo < hi-1 {
-				mid := (lo + hi) / 2
-				if rf.logs[mid].Term == reply.ConflictTerm {
-					hi = mid
-				} else {
-					lo = mid
-				}
+			index := rf.nextIndex[peer] - 1
+			for index >= 0 && rf.logs[index].Term > reply.ConflictTerm {
+				index--
 			}
-			if rf.logs[lo].Term == reply.ConflictTerm {
-				rf.nextIndex[peer] = lo + 1
+			if index >= 0 && rf.logs[index].Term == reply.ConflictTerm {
+				rf.nextIndex[peer] = index + 1
+				return
 			}
 		}
 		if !reply.Success {
@@ -194,10 +191,22 @@ func (rf *Raft) heartBeat() {
 
 		rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-		sortMatchIndex := make([]int, len(rf.matchIndex))
-		copy(sortMatchIndex, rf.matchIndex)
-		sort.Ints(sortMatchIndex)
-		newCommitIndex := sortMatchIndex[len(sortMatchIndex)/2-1]
+
+		// Find the highest index that is committed by majority
+		newCommitIndex := rf.commitIndex
+		for i := rf.getLastLogIndex(); i > rf.commitIndex; i-- {
+			count := 1 // leader counts
+			for j := range rf.peers {
+				if j != rf.me && rf.matchIndex[j] >= i {
+					count++
+				}
+			}
+			if count > len(rf.peers)/2 {
+				newCommitIndex = i
+				break
+			}
+		}
+
 		if newCommitIndex > rf.commitIndex {
 			if rf.checkLogMatch(newCommitIndex, rf.currentTerm) {
 				rf.commitIndex = newCommitIndex
@@ -219,6 +228,11 @@ func (rf *Raft) switchRole(role raftState) {
 	}
 	switch role {
 	case Leader:
+		// Initialize leader state
+		for i := range rf.peers {
+			rf.nextIndex[i] = rf.getLastLogIndex() + 1
+			rf.matchIndex[i] = 0
+		}
 		rf.heartbeatTicker.Reset(heartbeatTimeout())
 		rf.electionTicker.Stop()
 	case Follower:
@@ -242,6 +256,7 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTicker.C:
 			rf.Lock()
 			if rf.role == Leader {
+				// dPrintfRaft(rf, "heartbeat comes")
 				go rf.heartBeat()
 				rf.heartbeatTicker.Reset(heartbeatTimeout())
 			}
@@ -276,6 +291,7 @@ func (rf *Raft) election() {
 				// check majority
 				if voted > len(rf.peers)/2 {
 					rf.switchRole(Leader)
+					rf.heartBeat()
 				}
 			} else if reply.Term > rf.currentTerm {
 				// someone else becomes leader
@@ -337,14 +353,14 @@ func Make(
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
-	go func() {
-		if Debug {
-			timer := time.NewTicker(time.Second)
-			for range timer.C {
-				DPrintf("Raft %d is in %s role\n", rf.me, rf.role)
-			}
-		}
-	}()
+	// go func() {
+	// 	if Debug {
+	// 		timer := time.NewTicker(time.Second)
+	// 		for range timer.C {
+	// 			DPrintf("Raft %d is in %s role\n", rf.me, rf.role)
+	// 		}
+	// 	}
+	// }()
 
 	return rf
 }
