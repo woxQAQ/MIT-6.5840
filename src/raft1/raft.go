@@ -113,6 +113,7 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 		Term:    rf.currentTerm,
 	}
 	rf.logs = append(rf.logs, entry)
+	rf.persist()
 
 	return len(rf.logs) - 1, rf.currentTerm, rf.role == Leader
 }
@@ -180,6 +181,7 @@ func (rf *Raft) heartBeat() {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.switchRole(Follower)
+				rf.persist()
 			} else if reply.Term == rf.currentTerm {
 				rf.nextIndex[peer] = reply.ConflictIndex
 				if reply.ConflictTerm != -1 {
@@ -250,6 +252,7 @@ func (rf *Raft) ticker() {
 			rf.Lock()
 			rf.switchRole(Candidate)
 			rf.currentTerm++
+			rf.persist()
 			rf.election()
 			rf.electionTicker.Reset(randomElectionTimeout())
 			rf.Unlock()
@@ -267,6 +270,7 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) election() {
 	rf.votedFor = rf.me
+	rf.persist()
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
@@ -298,6 +302,7 @@ func (rf *Raft) election() {
 				rf.currentTerm = reply.Term
 				rf.switchRole(Follower)
 				rf.votedFor = -1
+				rf.persist()
 			}
 		}
 	}

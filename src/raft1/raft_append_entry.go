@@ -24,6 +24,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 	rf.switchRole(Follower)
 	rf.electionTicker.Reset(randomElectionTimeout())
@@ -42,13 +43,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			reply.ConflictIndex = index + 1
 		}
-		// TODO:set conflict index
 		return
 	}
 
 	rf.logs = rf.logs[:index+1]
 	if len(args.Entries) > 0 {
 		rf.logs = append(rf.logs, args.Entries...)
+		rf.persist()
 	}
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())

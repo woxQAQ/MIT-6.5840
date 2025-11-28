@@ -21,6 +21,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.switchRole(Follower)
+		rf.persist()
 	}
 
 	if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
@@ -30,6 +31,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
+	rf.persist()
 	rf.electionTicker.Reset(randomElectionTimeout())
 }
 
