@@ -41,10 +41,10 @@ type Raft struct {
 	// candidateId that received vote
 	// in current term (or null if none)
 	votedFor int
-	// log entries; each entry contains command for state machine,
+	// logs entries; each entry contains command for state machine,
 	// and term when entry was received by leader
 	// first index is 1
-	log []LogEntry
+	logs []LogEntry
 
 	// volatile state on all servers
 	//
@@ -71,7 +71,7 @@ type Raft struct {
 }
 
 func (rf *Raft) getLastLogIndex() int {
-	return len(rf.log) - 1
+	return len(rf.logs) - 1
 }
 
 // return currentTerm and whether this server
@@ -104,21 +104,18 @@ func (rf *Raft) GetState() (int, bool) {
 // the leader.
 func (rf *Raft) Start(command any) (int, int, bool) {
 	// Your code here (3B).
-	term, isLeader := rf.GetState()
-	if !isLeader {
-		return -1, term, isLeader
-	}
-
-	entry := LogEntry{
-		Command: command,
-		Term:    term,
-	}
-
 	rf.Lock()
 	defer rf.Unlock()
-	rf.log = append(rf.log, entry)
+	if rf.role != Leader {
+		return -1, -1, false
+	}
+	entry := LogEntry{
+		Command: command,
+		Term:    rf.currentTerm,
+	}
+	rf.logs = append(rf.logs, entry)
 
-	return len(rf.log) - 1, term, isLeader
+	return len(rf.logs) - 1, rf.currentTerm, rf.role == Leader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -140,21 +137,22 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) heartBeat() {
-	if rf.role != Leader {
-		return
-	}
 	sendAppendEntriesToPeer := func(peer int) {
 		rf.RLock()
+		if rf.role != Leader {
+			return
+		}
 		prevLogIndex := rf.nextIndex[peer] - 1
+		// entries := make([]LogEntry, len(rf.logs[prevLogIndex+1:]))
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
-			Entries:      slices.Clone(rf.log[rf.nextIndex[peer]:]),
+			Entries:      slices.Clone(rf.logs[rf.nextIndex[peer]:]),
 			LeaderCommit: rf.commitIndex,
 		}
 		if prevLogIndex >= 0 {
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			args.PrevLogTerm = rf.logs[prevLogIndex].Term
 		}
 		rf.RUnlock()
 		reply := AppendEntriesReply{}
@@ -170,13 +168,13 @@ func (rf *Raft) heartBeat() {
 			lo, hi := -1, args.PrevLogIndex
 			for lo < hi-1 {
 				mid := (lo + hi) / 2
-				if rf.log[mid].Term == reply.ConflictTerm {
+				if rf.logs[mid].Term == reply.ConflictTerm {
 					hi = mid
 				} else {
 					lo = mid
 				}
 			}
-			if rf.log[lo].Term == reply.ConflictTerm {
+			if rf.logs[lo].Term == reply.ConflictTerm {
 				rf.nextIndex[peer] = lo + 1
 			}
 		}
@@ -185,7 +183,6 @@ func (rf *Raft) heartBeat() {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.switchRole(Follower)
-				return
 			} else if reply.Term == rf.currentTerm {
 				rf.nextIndex[peer] = reply.ConflictIndex
 				if reply.ConflictTerm != -1 {
@@ -195,16 +192,16 @@ func (rf *Raft) heartBeat() {
 			return
 		}
 
-		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 		rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 		sortMatchIndex := make([]int, len(rf.matchIndex))
 		copy(sortMatchIndex, rf.matchIndex)
 		sort.Ints(sortMatchIndex)
-		newCommitIndex := sortMatchIndex[len(sortMatchIndex)/2]
+		newCommitIndex := sortMatchIndex[len(sortMatchIndex)/2-1]
 		if newCommitIndex > rf.commitIndex {
 			if rf.checkLogMatch(newCommitIndex, rf.currentTerm) {
 				rf.commitIndex = newCommitIndex
-				// TODO: apply committed log entries
+				go rf.applyLog()
 			}
 		}
 	}
@@ -245,7 +242,7 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTicker.C:
 			rf.Lock()
 			if rf.role == Leader {
-				rf.heartBeat()
+				go rf.heartBeat()
 				rf.heartbeatTicker.Reset(heartbeatTimeout())
 			}
 			rf.Unlock()
@@ -259,7 +256,7 @@ func (rf *Raft) election() {
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: rf.getLastLogIndex(),
-		LastLogTerm:  rf.log[rf.getLastLogIndex()].Term,
+		LastLogTerm:  rf.logs[rf.getLastLogIndex()].Term,
 	}
 	// number of votes received
 	voted := 1
@@ -274,7 +271,7 @@ func (rf *Raft) election() {
 			}
 			// NOTE: it's impossible to receive
 			// vote granted from a higher term
-			if rf.role == Candidate && reply.VoteGranted {
+			if rf.currentTerm == args.Term && rf.role == Candidate && reply.VoteGranted {
 				voted += 1
 				// check majority
 				if voted > len(rf.peers)/2 {
@@ -323,7 +320,7 @@ func Make(
 		persister:       persister,
 		me:              me,
 		applych:         applyCh,
-		log:             []LogEntry{{Term: 0}}, // log index starts from 1
+		logs:            []LogEntry{{Term: 0}}, // log index starts from 1
 		matchIndex:      make([]int, len(peers)),
 		nextIndex:       make([]int, len(peers)),
 		votedFor:        -1,
@@ -333,9 +330,21 @@ func Make(
 	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	for peer := range peers {
+		rf.matchIndex[peer], rf.nextIndex[peer] = 0, rf.getLastLogIndex()+1
+	}
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go func() {
+		if Debug {
+			timer := time.NewTicker(time.Second)
+			for range timer.C {
+				DPrintf("Raft %d is in %s role\n", rf.me, rf.role)
+			}
+		}
+	}()
 
 	return rf
 }

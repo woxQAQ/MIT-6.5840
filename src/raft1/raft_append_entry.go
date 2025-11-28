@@ -5,7 +5,7 @@ import (
 )
 
 func (rf *Raft) checkLogMatch(index, term int) bool {
-	return index <= len(rf.log)-1 && rf.log[index].Term == term
+	return index <= rf.getLastLogIndex() && rf.logs[index].Term == term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -20,24 +20,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		fail()
 		return
-	} else if args.Term > rf.currentTerm {
+	}
+	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
 	rf.switchRole(Follower)
+	rf.electionTicker.Reset(randomElectionTimeout())
 
 	index := args.PrevLogIndex
 	if !rf.checkLogMatch(index, args.PrevLogTerm) {
 		fail()
+		lastLogIndex := rf.getLastLogIndex()
+		if lastLogIndex < args.PrevLogIndex {
+			reply.ConflictIndex = lastLogIndex + 1
+			reply.ConflictTerm = -1
+		} else {
+			index := args.PrevLogIndex
+			for index >= 0 && rf.logs[index].Term == args.PrevLogTerm {
+				index--
+			}
+			reply.ConflictIndex = index + 1
+			reply.ConflictTerm = args.PrevLogTerm
+		}
 		return
 	}
 
-	rf.log = rf.log[:index+1]
+	rf.logs = rf.logs[:index+1]
 	if len(args.Entries) > 0 {
-		rf.log = append(rf.log, args.Entries...)
+		rf.logs = append(rf.logs, args.Entries...)
 	}
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
+		// TODO: apply log
 		go rf.applyLog()
 	}
 
@@ -51,7 +66,7 @@ func (rf *Raft) applyLog() {
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		msg = append(msg, raftapi.ApplyMsg{
 			CommandValid: true,
-			Command:      rf.log[i].Command,
+			Command:      rf.logs[i].Command,
 			CommandIndex: i,
 		})
 	}
@@ -65,8 +80,6 @@ func (rf *Raft) applyLog() {
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	dPrintfRaft(rf, "Sending Append Entries %v to peer %v", args, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	dPrintfRaft(rf, "receive from peer %d, reply: %v", server, reply)
 	return ok
 }

@@ -5,13 +5,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.Lock()
 	defer rf.Unlock()
+	fail := func() {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+	}
 
 	termDelay := args.Term < rf.currentTerm
 	hasVotedForOthers := args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId
 
 	if termDelay || hasVotedForOthers {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
+		fail()
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -21,24 +24,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
+		fail()
 		return
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
+	rf.electionTicker.Reset(randomElectionTimeout())
 }
 
 // NOTE: unsafe without lock
-func (rf *Raft) isLogUpToDate(lastLogIndex int, lastLogTerm int) bool {
-	ourLastLogIndex := len(rf.log) - 1
-	ourLastLogTerm := rf.log[ourLastLogIndex].Term
-
-	if lastLogTerm == ourLastLogTerm {
-		return lastLogIndex >= ourLastLogIndex
-	}
-	return lastLogTerm > ourLastLogTerm
+func (rf *Raft) isLogUpToDate(index, term int) bool {
+	lastIndex := rf.getLastLogIndex()
+	return term > rf.logs[lastIndex].Term || (term == rf.logs[lastIndex].Term && index >= lastIndex)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -70,8 +68,6 @@ func (rf *Raft) isLogUpToDate(lastLogIndex int, lastLogTerm int) bool {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	dPrintfRaft(rf, "Sending RequestVote to peer %d", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	dPrintfRaft(rf, "receive reply from peer %d,reply: %v", server, reply)
 	return ok
 }
